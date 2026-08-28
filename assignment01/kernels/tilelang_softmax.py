@@ -19,10 +19,43 @@ contract：
 Tip: elementwise + 行内归约的 kernel 大概率是带宽瓶颈，可以想想理论上限是多少。
 """
 
-import torch
 import tilelang
 import tilelang.language as T
+import torch
 
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError("从这里开始写")
+    M, N = x.shape
+    BLOCK_N = 1 << (N - 1).bit_length()
+    threads = 128
+    prog = make_softmax(M, N, BLOCK_N, threads)
+    kernel = tilelang.compile(prog, out_idx=[1])
+    return kernel(x)
+
+
+def make_softmax(M, N, BLOCK_N, threads=128, dtype="float32"):
+    @T.prim_func
+    def main(A: T.Buffer((M, N), dtype), B: T.Buffer((M, N), dtype)):
+        with T.Kernel(M, 1, threads=threads) as (bx, _):
+            # in to x
+            x_local = T.alloc_fragment((BLOCK_N,), dtype)
+            for col in T.Parallel(BLOCK_N):
+                x_local[col] = T.if_then_else(col < N, A[bx, col], -T.infinity(dtype))
+
+            # reduce_max
+            max_local = T.alloc_fragment((1,), dtype)
+            T.reduce_max(x_local, max_local, dim=0)
+
+            # exp(x - max)
+            for col in T.Parallel(BLOCK_N):
+                x_local[col] = T.exp(x_local[col] - max_local[0])
+
+            # reduce_sum
+            sum_local = T.alloc_fragment((1,), dtype)
+            T.reduce_sum(x_local, sum_local, dim=0)
+
+            for col in T.Parallel(BLOCK_N):
+                if col < N:
+                    B[bx, col] = x_local[col] / sum_local[0]
+
+    return main

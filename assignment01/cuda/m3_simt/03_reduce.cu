@@ -39,11 +39,79 @@
 #define BLOCK 256
 
 __global__ void reduce_interleaved(const float *in, float *out) {
-    // TODO：从这里开始写（交错配对版本）
+    // alloc shared mem
+    __shared__ float buf[BLOCK];
+    // copy items
+    int tid = threadIdx.x;
+    buf[tid] = in[blockIdx.x * blockDim.x + tid];
+    // sync threads
+    __syncthreads();
+
+    // start loop
+    for (int s = 1; s < blockDim.x; s *= 2) {
+        if (tid % (2 * s) == 0) buf[tid] += buf[tid + s];
+        __syncthreads();
+    }
+
+    // finished, buf[0] to out[b]
+    if (tid == 0) out[blockIdx.x] = buf[tid];
 }
 
 __global__ void reduce_contiguous(const float *in, float *out) {
-    // TODO：从这里开始写（连续配对版本）
+    // alloc shared mem
+    __shared__ float buf[BLOCK];
+    // copy items
+    int tid = threadIdx.x;
+    buf[tid] = in[blockIdx.x * blockDim.x + tid];
+    // sync threads
+    __syncthreads();
+
+    // start loop
+    int s = blockDim.x / 2;
+    while (s > 0) {
+        if (tid < s) buf[tid] += buf[tid + s];
+        __syncthreads();
+        s /= 2;
+    }
+
+    // finished, buf[0] to out[b]
+    if (tid == 0) out[blockIdx.x] = buf[tid];
+}
+
+__global__ void reduce_shuffle(const float *in, float *out) {
+
+    // alloc shared mem
+    __shared__ float buf[BLOCK];
+    // copy items
+    int tid = threadIdx.x;
+    buf[tid] = in[blockIdx.x * blockDim.x + tid];
+    // sync threads
+    __syncthreads();
+
+    // reduce between warps
+    int s = blockDim.x / 2;
+    while (s >= 32) {
+        if (tid < s) buf[tid] += buf[tid + s];
+        __syncthreads();
+        s /= 2;
+    }
+
+    // reduce inside the 1st warp
+    // shfl can only access registers, copy items into a local var
+    unsigned warpSize = 32;
+    float sum = 0;
+    if (tid < warpSize) sum = buf[tid];
+
+    // delta = 16, 8, 4, 2, 1
+    unsigned delta = warpSize / 2;
+    while (delta > 0) {
+        unsigned mask = 0xffffffff;
+        if (tid < 32) sum += __shfl_down_sync(mask, sum, delta);
+        delta /= 2;
+    }
+
+    // finished, tid 0's sum to out[b]
+    if (tid == 0) out[blockIdx.x] = sum;
 }
 
 // ---------------- 以下是判测与计时，不要修改 ----------------
@@ -97,6 +165,8 @@ int main() {
     float ms_i = run_one(reduce_interleaved, "interleaved", d_in, d_out, h_out,
                          h_partial, nblocks);
     float ms_c = run_one(reduce_contiguous, "contiguous ", d_in, d_out, h_out,
+                         h_partial, nblocks);
+    float ms_s = run_one(reduce_shuffle, "shuffle ", d_in, d_out, h_out,
                          h_partial, nblocks);
     // 阈值 1.5x：A100 实测 2.22x、V100 实测 2.33x，两版写成一样时是 ~1x。
     float ratio = report_speedup("interleaved / contiguous", ms_i, ms_c, 1.5f,

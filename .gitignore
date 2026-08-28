@@ -9,6 +9,9 @@ CLAUDE.local.md
 .cursor/
 .aider*
 .windsurf/
+.clang-format
+.clangd
+.zed/
 
 # LaTeX build artifacts (the copy at assignment*/assignment*.pdf is committed;
 # the duplicate inside handout/ build dirs is not)
@@ -31,6 +34,7 @@ assignment*/handout/*.pdf
 __pycache__/
 *.py[cod]
 .venv/
+uv.lock
 *.egg-info/
 .pytest_cache/
 .ruff_cache/

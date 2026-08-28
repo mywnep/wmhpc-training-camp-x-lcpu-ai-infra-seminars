@@ -9,8 +9,8 @@
 //      外，窗口从"数据已经在内存里备好"开始，到 CPU 把结果全部读完为止
 //      （下面用一个累加校验和的循环代表"CPU 读完全部结果"，别把它删了）。
 // 改完仍要 PASS。
-#include <chrono>
 #include "common.h"
+#include <chrono>
 
 __global__ void vectorAdd(const float *a, const float *b, float *c, int n) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -25,20 +25,19 @@ int main() {
     // 放进计时窗口会把要观察的差距完全淹掉。
     CUDA_CHECK(cudaFree(0));
 
-    float *h_a = (float *)malloc(bytes);
-    float *h_b = (float *)malloc(bytes);
-    float *h_c = (float *)malloc(bytes);
-    fill_random(h_a, n, 1);
-    fill_random(h_b, n, 2);
+    float *h_a = nullptr;
+    float *h_b = nullptr;
+    float *h_c = nullptr;
+
+    CUDA_CHECK(cudaMallocManaged(&h_a, bytes));
+    CUDA_CHECK(cudaMallocManaged(&h_b, bytes));
+    CUDA_CHECK(cudaMallocManaged(&h_c, bytes));
+    fill_random(h_a, n, 6);
+    fill_random(h_b, n, 7);
 
     // 期望的校验和，host 上先算好，同样不计入计时。
     double want = 0;
     for (int i = 0; i < n; i++) want += (double)(h_a[i] + h_b[i]);
-
-    float *d_a, *d_b, *d_c;
-    CUDA_CHECK(cudaMalloc(&d_a, bytes));
-    CUDA_CHECK(cudaMalloc(&d_b, bytes));
-    CUDA_CHECK(cudaMalloc(&d_c, bytes));
 
     int threads = 256;
     int blocks = (n + threads - 1) / threads;
@@ -46,13 +45,9 @@ int main() {
     // ================= 计时窗口开始 =================
     auto t0 = std::chrono::steady_clock::now();
 
-    CUDA_CHECK(cudaMemcpy(d_a, h_a, bytes, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
-
-    vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
-    CUDA_CHECK_KERNEL();
-
-    CUDA_CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));
+    vectorAdd<<<blocks, threads>>>(h_a, h_b, h_c, n);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // CUDA_CHECK_KERNEL();
 
     // CPU 读完全部结果。unified memory 版里，这一步才会把结果页搬回 host。
     double got = 0;
@@ -60,6 +55,10 @@ int main() {
 
     auto t1 = std::chrono::steady_clock::now();
     // ================= 计时窗口结束 =================
+
+    cudaFree(h_a);
+    cudaFree(h_b);
+    cudaFree(h_c);
 
     printf("搬运 + kernel + 读回: %.1f ms\n",
            std::chrono::duration<double, std::milli>(t1 - t0).count());
